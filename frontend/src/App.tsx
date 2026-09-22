@@ -14,6 +14,10 @@ import {
   RefreshCw,
   PlusCircle,
   Eye,
+  EyeOff,
+  Lock,
+  Mail,
+  ArrowLeft,
   LogOut,
   Bike,
   ClipboardList,
@@ -26,7 +30,13 @@ import {
 
 import { SignatureCanvas } from './components/SignatureCanvas';
 import { LeafletMap } from './components/LeafletMap';
+import { LocationPickerMap } from './components/LocationPickerMap';
 import { DispatcherWorkspace } from './components/DispatcherWorkspace';
+import {
+  BenchmarkExperimentCard,
+  LimitationsReportCard,
+  DemoMediaHubCard
+} from './components/ReviewOneDeliverables';
 import {
   savePendingEvidence,
   getPendingEvidenceItems,
@@ -75,7 +85,7 @@ interface Evidence {
 
 const getEvidenceUrl = (url?: string) => {
   if (!url) return '';
-  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) {
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:') || url.startsWith('blob:')) {
     return url;
   }
   const backendBase = import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin;
@@ -103,20 +113,40 @@ const getRoleFromLocation = (currentPathName: string): string | null => {
   return null;
 };
 
+const getLoginRoleFromLocation = (currentPathName: string): string | null => {
+  const path = currentPathName.replace(/^\/|\/$/g, '').toLowerCase();
+  if (path.startsWith('login/')) {
+    const role = path.replace('login/', '');
+    if (VALID_ROLES.includes(role)) return role;
+  }
+  const hash = window.location.hash.replace(/^#\/?|\/$/g, '').toLowerCase();
+  if (hash.startsWith('login/')) {
+    const role = hash.replace('login/', '');
+    if (VALID_ROLES.includes(role)) return role;
+  }
+  return null;
+};
+
 const isUnknownRoute = (currentPathName: string): boolean => {
   const path = currentPathName.replace(/^\/|\/$/g, '').toLowerCase();
   const hash = window.location.hash.replace(/^#\/?|\/$/g, '').toLowerCase();
   
-  const hasPath = path !== '' && path !== 'login' && path !== 'index.html';
-  const hasHash = hash !== '' && hash !== 'login';
+  if (path === '' || path === 'index.html') return false;
+  if (VALID_ROLES.includes(path)) return false;
+  if (path.startsWith('login/')) {
+    const role = path.replace('login/', '');
+    if (VALID_ROLES.includes(role)) return false;
+  }
   
-  if (hasPath && !VALID_ROLES.includes(path)) {
+  if (hash !== '') {
+    if (VALID_ROLES.includes(hash)) return false;
+    if (hash.startsWith('login/')) {
+      const role = hash.replace('login/', '');
+      if (VALID_ROLES.includes(role)) return false;
+    }
     return true;
   }
-  if (hasHash && !VALID_ROLES.includes(hash)) {
-    return true;
-  }
-  return false;
+  return true;
 };
 
 export default function App() {
@@ -133,7 +163,12 @@ export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('pod_token'));
   const [userRole, setUserRole] = useState<string>(localStorage.getItem('pod_role') || getRoleFromLocation(window.location.pathname) || 'rider');
   const [userEmail, setUserEmail] = useState<string>(localStorage.getItem('pod_email') || 'rider@pod.com');
-  const [selectedEmail, setSelectedEmail] = useState<string | null>(null);
+
+  const [loginEmail, setLoginEmail] = useState<string>('');
+  const [loginPassword, setLoginPassword] = useState<string>('');
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
 
   // Network & Queue state
   const [isOfflineSimulated, setIsOfflineSimulated] = useState<boolean>(false);
@@ -154,12 +189,33 @@ export default function App() {
   const [capturedLng, setCapturedLng] = useState<number | null>(77.594566);
   const [disableGPS, setDisableGPS] = useState<boolean>(false);
   const [otpEntered, setOtpEntered] = useState<string>('');
+  const [otpError, setOtpError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
   // Evidence Review state (for Dispatcher/Admin)
   const [reviewedEvidence, setReviewedEvidence] = useState<Evidence | null>(null);
   const [showEvidenceModal, setShowEvidenceModal] = useState<boolean>(false);
   const [deliveryToDelete, setDeliveryToDelete] = useState<string | null>(null);
+
+  // Track submitted/updated evidence state per delivery
+  const [deliveryEvidenceMap, setDeliveryEvidenceMap] = useState<Record<string, any>>(() => {
+    const map: Record<string, any> = {};
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('pod_evidence_')) {
+          const deliveryId = key.replace('pod_evidence_', '');
+          const val = localStorage.getItem(key);
+          if (val) {
+            map[deliveryId] = JSON.parse(val);
+          }
+        }
+      }
+    } catch {
+      // ignore storage error
+    }
+    return map;
+  });
 
   // Create Delivery Form state
   const [newDeliveryId, setNewDeliveryId] = useState(`DEL-${Math.floor(1000 + Math.random() * 9000)}`);
@@ -168,7 +224,7 @@ export default function App() {
   const [newAddress, setNewAddress] = useState('789 Cyberdyne Way, Block C');
   const [newLat, setNewLat] = useState(12.971598);
   const [newLng, setNewLng] = useState(77.594566);
-  const [newOtp, setNewOtp] = useState('9876');
+  const [newOtpCode, setNewOtpCode] = useState<string>('');
 
   // Admin Analytics state
   const [fromDate, setFromDate] = useState<string>('');
@@ -406,10 +462,11 @@ export default function App() {
     if (activeTab === 'admin_analytics') {
       fetchAnalytics();
       fetchValidationSummary();
+      fetchExperimentRuns();
     }
-  }, [activeTab, token, userRole]);
-
-  useEffect(() => {
+    if (activeTab === 'validation') {
+      fetchValidationSummary();
+    }
     if (activeTab === 'experiments') {
       fetchExperimentRuns();
     }
@@ -427,8 +484,11 @@ export default function App() {
       const headers = { Authorization: `Bearer ${token}` };
       const resp = await axios.get('/api/v1/admin/experiments', { headers });
       setRuns(resp.data);
-      if (resp.data.length > 0 && !selectedRunId) {
-        setSelectedRunId(resp.data[0].id);
+      if (resp.data.length > 0) {
+        const benchmarkRun = resp.data.find((r: any) => r.id === 'RUN-BENCHMARK-01');
+        const targetRunId = selectedRunId || (benchmarkRun ? benchmarkRun.id : resp.data[0].id);
+        setSelectedRunId(targetRunId);
+        fetchExperimentDetail(targetRunId);
       }
     } catch (err) {
       console.error(err);
@@ -485,41 +545,64 @@ export default function App() {
     }
   };
 
-  const handleLogin = async (email: string, pass: string) => {
-    const preset = loginPresets.find(p => p.email === email);
-    const expectedRole = preset ? preset.role : 'rider';
+  const handleRoleLogin = async (targetRole: string, e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setLoginError(null);
 
+    const emailToUse = loginEmail.trim();
+    if (!emailToUse || !loginPassword) {
+      setLoginError('Please enter both email and password.');
+      return;
+    }
+
+    setIsLoggingIn(true);
     try {
-      const resp = await axios.post('/api/v1/auth/login', { email, password: pass });
+      const resp = await axios.post('/api/v1/auth/login', {
+        email: emailToUse,
+        password: loginPassword
+      });
       const { access_token, user } = resp.data;
+
+      // Strict role check: Prevent a user from logging into a different role
+      if (user.role !== targetRole) {
+        setLoginError(`Access denied: This account is registered as "${user.role.toUpperCase()}" and is not authorized to access the ${targetRole.toUpperCase()} portal.`);
+        setIsLoggingIn(false);
+        return;
+      }
+
       setToken(access_token);
       setUserRole(user.role);
       setUserEmail(user.email);
       localStorage.setItem('pod_token', access_token);
       localStorage.setItem('pod_role', user.role);
       localStorage.setItem('pod_email', user.email);
+
       const targetTab = getDashboardTabForRole(user.role);
       setActiveTab(targetTab);
       await fetchDeliveries(access_token);
+      setLoginPassword('');
+      setLoginError(null);
       navigate(`/${user.role}`);
-    } catch (err) {
-      alert('Login failed! Using offline demo session.');
-      setToken('demo_token');
-      setUserRole(expectedRole);
-      setUserEmail(email);
-      localStorage.setItem('pod_token', 'demo_token');
-      localStorage.setItem('pod_role', expectedRole);
-      localStorage.setItem('pod_email', email);
-      const targetTab = getDashboardTabForRole(expectedRole);
-      setActiveTab(targetTab);
-      await fetchDeliveries('demo_token');
-      navigate(`/${expectedRole}`);
+    } catch (err: any) {
+      if (err.response?.status === 401) {
+        setLoginError('Incorrect email or password. Please try again.');
+      } else if (err.response?.data?.detail) {
+        setLoginError(err.response.data.detail);
+      } else {
+        setLoginError('Authentication failed. Please check your credentials and server connection.');
+      }
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
   const handleLogout = () => {
     setToken(null);
     setUserRole('rider');
+    setUserEmail('');
+    setLoginEmail('');
+    setLoginPassword('');
+    setLoginError(null);
     localStorage.removeItem('pod_token');
     localStorage.removeItem('pod_role');
     localStorage.removeItem('pod_email');
@@ -530,64 +613,76 @@ export default function App() {
     const handleUrlRouting = async () => {
       setIsInitializing(true);
       if (isUnknownRoute(currentPath)) {
-        alert("Unknown or invalid role. Redirecting to login preset page.");
         handleLogout();
+        setIsInitializing(false);
+        return;
+      }
+
+      const loginRoleFromUrl = getLoginRoleFromLocation(currentPath);
+      if (loginRoleFromUrl) {
+        const storedToken = localStorage.getItem('pod_token');
+        const storedRole = localStorage.getItem('pod_role');
+        if (storedToken && storedRole === loginRoleFromUrl) {
+          setToken(storedToken);
+          setUserRole(storedRole);
+          setUserEmail(localStorage.getItem('pod_email') || `${storedRole}@pod.com`);
+          setActiveTab(getDashboardTabForRole(storedRole));
+          await fetchDeliveries(storedToken);
+          navigate(`/${storedRole}`);
+        } else {
+          setToken(null);
+          setLoginError(null);
+          const preset = loginPresets.find(p => p.role === loginRoleFromUrl);
+          if (preset) {
+            setLoginEmail(preset.email);
+          }
+          setLoginPassword('');
+        }
         setIsInitializing(false);
         return;
       }
 
       const roleFromUrl = getRoleFromLocation(currentPath);
       if (roleFromUrl) {
-        const preset = loginPresets.find(p => p.role === roleFromUrl);
-        if (preset) {
-          const storedToken = localStorage.getItem('pod_token');
-          const storedRole = localStorage.getItem('pod_role');
-          
-          if (!storedToken || storedRole !== roleFromUrl) {
-            try {
-              const resp = await axios.post('/api/v1/auth/login', { email: preset.email, password: preset.pass });
-              const { access_token, user } = resp.data;
-              setToken(access_token);
-              setUserRole(user.role);
-              setUserEmail(user.email);
-              localStorage.setItem('pod_token', access_token);
-              localStorage.setItem('pod_role', user.role);
-              localStorage.setItem('pod_email', user.email);
-              setActiveTab(getDashboardTabForRole(user.role));
-              await fetchDeliveries(access_token);
-            } catch (err) {
-              setToken('demo_token');
-              setUserRole(roleFromUrl);
-              setUserEmail(preset.email);
-              localStorage.setItem('pod_token', 'demo_token');
-              localStorage.setItem('pod_role', roleFromUrl);
-              localStorage.setItem('pod_email', preset.email);
-              setActiveTab(getDashboardTabForRole(roleFromUrl));
-              await fetchDeliveries('demo_token');
-            }
-          } else {
-            setToken(storedToken);
-            setUserRole(storedRole);
-            setUserEmail(localStorage.getItem('pod_email') || preset.email);
-            const tab = getDashboardTabForRole(storedRole);
-            setActiveTab(prev => {
-              if (storedRole === 'admin') return prev;
-              if (storedRole === 'dispatcher' && (prev === 'deliveries' || prev === 'validation' || prev === 'dispatcher')) return prev;
-              if (storedRole === 'restaurant' && (prev === 'deliveries' || prev === 'validation' || prev === 'create_delivery')) return prev;
-              if (storedRole === 'customer') return 'deliveries';
-              if (storedRole === 'rider' && (prev === 'deliveries' || prev === 'validation' || prev === 'evidence_capture')) return prev;
-              return tab;
-            });
-            await fetchDeliveries(storedToken);
-          }
+        const storedToken = localStorage.getItem('pod_token');
+        const storedRole = localStorage.getItem('pod_role');
+        
+        if (!storedToken || storedRole !== roleFromUrl) {
+          // Unauthenticated or role mismatch -> Redirect to login page for this role
+          navigate(`/login/${roleFromUrl}`);
+          setIsInitializing(false);
+          return;
+        } else {
+          setToken(storedToken);
+          setUserRole(storedRole);
+          setUserEmail(localStorage.getItem('pod_email') || `${storedRole}@pod.com`);
+          const tab = getDashboardTabForRole(storedRole);
+          setActiveTab(prev => {
+            if (storedRole === 'admin') return prev;
+            if (storedRole === 'dispatcher' && (prev === 'deliveries' || prev === 'validation' || prev === 'dispatcher')) return prev;
+            if (storedRole === 'restaurant' && (prev === 'deliveries' || prev === 'validation' || prev === 'create_delivery')) return prev;
+            if (storedRole === 'customer') return 'deliveries';
+            if (storedRole === 'rider' && (prev === 'deliveries' || prev === 'validation' || prev === 'evidence_capture')) return prev;
+            return tab;
+          });
+          await fetchDeliveries(storedToken);
         }
       } else {
-        // Clear auth state to show login presets page when path is root
-        setToken(null);
-        setUserRole('rider');
-        localStorage.removeItem('pod_token');
-        localStorage.removeItem('pod_role');
-        localStorage.removeItem('pod_email');
+        const storedToken = localStorage.getItem('pod_token');
+        const storedRole = localStorage.getItem('pod_role');
+        if (storedToken && storedRole && VALID_ROLES.includes(storedRole)) {
+          setToken(storedToken);
+          setUserRole(storedRole);
+          setUserEmail(localStorage.getItem('pod_email') || `${storedRole}@pod.com`);
+          setActiveTab(getDashboardTabForRole(storedRole));
+          await fetchDeliveries(storedToken);
+          navigate(`/${storedRole}`);
+        } else {
+          setToken(null);
+          localStorage.removeItem('pod_token');
+          localStorage.removeItem('pod_role');
+          localStorage.removeItem('pod_email');
+        }
       }
       setIsInitializing(false);
     };
@@ -597,14 +692,25 @@ export default function App() {
 
   useEffect(() => {
     const handleUrlChange = () => {
-      const hashRole = getRoleFromLocation(window.location.hash);
+      const loginRolePath = getLoginRoleFromLocation(window.location.pathname);
+      const loginRoleHash = getLoginRoleFromLocation(window.location.hash);
+      if (loginRolePath) {
+        setCurrentPath(`/login/${loginRolePath}`);
+        return;
+      }
+      if (loginRoleHash) {
+        setCurrentPath(`/login/${loginRoleHash}`);
+        return;
+      }
+
       const pathRole = getRoleFromLocation(window.location.pathname);
+      const hashRole = getRoleFromLocation(window.location.hash);
       if (pathRole) {
         setCurrentPath(`/${pathRole}`);
       } else if (hashRole) {
         setCurrentPath(`/${hashRole}`);
       } else {
-        setCurrentPath(window.location.pathname);
+        setCurrentPath(window.location.pathname || '/');
       }
     };
     window.addEventListener('popstate', handleUrlChange);
@@ -614,6 +720,50 @@ export default function App() {
       window.removeEventListener('hashchange', handleUrlChange);
     };
   }, []);
+
+  const handleOpenCapture = (del: Delivery) => {
+    setSelectedDelivery(del);
+    setPhotoBlob(null);
+    setPhotoPreview(null);
+    setSignatureBase64(null);
+    if (del.target_latitude && del.target_longitude) {
+      setCapturedLat(del.target_latitude);
+      setCapturedLng(del.target_longitude);
+    }
+    setOtpEntered('');
+    setOtpError(null);
+    setDisableGPS(false);
+    setActiveTab('evidence_capture');
+  };
+
+  const handleUseSamplePhoto = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 400;
+    canvas.height = 300;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(0, 0, 400, 300);
+      ctx.fillStyle = '#f59e0b';
+      ctx.fillRect(80, 60, 240, 180);
+      ctx.strokeStyle = '#d97706';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(80, 60, 240, 180);
+      ctx.fillStyle = '#0f172a';
+      ctx.font = 'bold 20px monospace';
+      ctx.fillText('DELIVERY PARCEL', 110, 140);
+      ctx.font = '14px monospace';
+      ctx.fillText(selectedDelivery?.id || 'DEL-1111', 140, 175);
+
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const file = new File([blob], `photo_${selectedDelivery?.id || 'evidence'}.jpg`, { type: 'image/jpeg' });
+          setPhotoBlob(file);
+          setPhotoPreview(URL.createObjectURL(file));
+        }
+      }, 'image/jpeg', 0.95);
+    }
+  };
 
   const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -631,6 +781,30 @@ export default function App() {
       return;
     }
 
+    // Recipient OTP validation against delivery OTP (4 digits required)
+    const trimmedOtp = otpEntered.trim();
+    if (!trimmedOtp) {
+      const msg = 'Customer OTP code is required (4 digits). Please collect the OTP from the customer before submitting.';
+      setOtpError(msg);
+      alert(`Validation Error: ${msg}`);
+      return;
+    }
+
+    if (trimmedOtp.length !== 4) {
+      const msg = 'Customer OTP code must be exactly 4 digits.';
+      setOtpError(msg);
+      alert(`Validation Error: ${msg}`);
+      return;
+    }
+
+    if (selectedDelivery.otp_code && trimmedOtp !== selectedDelivery.otp_code.trim()) {
+      const msg = 'Invalid OTP. The entered code does not match this delivery record.';
+      setOtpError(msg);
+      alert('Invalid OTP');
+      return;
+    }
+
+    setOtpError(null);
     setIsSubmitting(true);
     const idempotencyKey = `POD-SYNC-${selectedDelivery.id}-${Date.now()}`;
     const timestampStr = new Date().toISOString();
@@ -653,6 +827,43 @@ export default function App() {
       await savePendingEvidence(pendingItem);
       const items = await getPendingEvidenceItems();
       setPendingQueueCount(items.length);
+
+      const offlineEvidence = {
+        id: idempotencyKey,
+        delivery_id: selectedDelivery.id,
+        photo_url: photoPreview,
+        signature_url: signatureBase64,
+        captured_latitude: disableGPS ? null : capturedLat,
+        captured_longitude: disableGPS ? null : capturedLng,
+        captured_timestamp: timestampStr,
+        is_offline_capture: true,
+        otp_entered: otpEntered,
+        otp_valid: liveScores.isOtpMatching,
+        distance_m: 0,
+        gps_valid: !disableGPS,
+        timestamp_valid: true,
+        blur_score: 250,
+        brightness_score: 120,
+        photo_score: liveScores.photoScore,
+        gps_score: liveScores.gpsScore,
+        timestamp_score: liveScores.timestampScore,
+        signature_score: liveScores.sigScore,
+        otp_score: liveScores.otpScore,
+        total_quality_score: liveScores.total,
+        classification: liveScores.classification,
+        created_at: timestampStr
+      };
+
+      setDeliveryEvidenceMap((prev) => ({
+        ...prev,
+        [selectedDelivery.id]: offlineEvidence
+      }));
+      try {
+        localStorage.setItem(`pod_evidence_${selectedDelivery.id}`, JSON.stringify(offlineEvidence));
+      } catch {
+        // ignore storage error
+      }
+
       alert(`[OFFLINE MODE] Evidence stored in local IndexedDB Queue! (Idempotency Key: ${idempotencyKey.slice(0, 16)}...)`);
       resetCaptureForm();
       setIsSubmitting(false);
@@ -674,7 +885,34 @@ export default function App() {
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       const resp = await axios.post('/api/v1/evidence/submit', formData, { headers });
 
-      alert(`Evidence submitted & verified! Total Score: ${resp.data.total_quality_score}/100 [${resp.data.classification}]`);
+      // Refresh/update that delivery's evidence state
+      const submittedEvidence = resp.data;
+      setDeliveryEvidenceMap((prev) => ({
+        ...prev,
+        [selectedDelivery.id]: submittedEvidence
+      }));
+      try {
+        localStorage.setItem(`pod_evidence_${selectedDelivery.id}`, JSON.stringify(submittedEvidence));
+      } catch {
+        // ignore storage error
+      }
+
+      // Update delivery status immediately in UI state
+      const newStatus = submittedEvidence.classification === 'ACCEPTED'
+        ? 'delivered'
+        : submittedEvidence.classification === 'NEEDS_MANUAL_REVIEW'
+        ? 'needs_review'
+        : 'disputed';
+
+      setDeliveries((prev) =>
+        prev.map((d) => (d.id === selectedDelivery.id ? { ...d, status: newStatus as any } : d))
+      );
+
+      if (resp.data.otp_valid === false) {
+        alert(`Evidence processed with Invalid OTP! Total Score: ${resp.data.total_quality_score}/100 [${resp.data.classification}]`);
+      } else {
+        alert(`Evidence submitted & verified! Total Score: ${resp.data.total_quality_score}/100 [${resp.data.classification}]`);
+      }
       resetCaptureForm();
       fetchDeliveries();
     } catch (err: any) {
@@ -691,6 +929,11 @@ export default function App() {
 
   const handleCreateDeliverySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanOtp = newOtpCode.trim();
+    if (cleanOtp.length !== 4 || !/^\d{4}$/.test(cleanOtp)) {
+      alert('Please enter a valid 4-digit numeric Delivery OTP.');
+      return;
+    }
     try {
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       await axios.post('/api/v1/deliveries/', {
@@ -700,13 +943,14 @@ export default function App() {
         delivery_address: newAddress,
         target_latitude: newLat,
         target_longitude: newLng,
-        otp_code: newOtp,
+        otp_code: cleanOtp,
         rider_id: 4, // Assigned to Rider John
         customer_id: 5 // Assigned to Customer Alice (Alice Smith)
       }, { headers });
 
-      alert(`Delivery ${newDeliveryId} created successfully!`);
+      alert(`Delivery ${newDeliveryId} created successfully! Verification OTP: ${cleanOtp}.`);
       setNewDeliveryId(`DEL-${Math.floor(1000 + Math.random() * 9000)}`);
+      setNewOtpCode('');
       fetchDeliveries();
 
       // Trigger cross-tab synchronization for open Customer dashboards
@@ -770,7 +1014,25 @@ export default function App() {
 
   const viewEvidenceDetails = async (deliveryId: string) => {
     try {
-      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      // 1. Check if we have newly submitted / updated evidence state for this delivery
+      const localEvidence = deliveryEvidenceMap[deliveryId] || (() => {
+        try {
+          const item = localStorage.getItem(`pod_evidence_${deliveryId}`);
+          return item ? JSON.parse(item) : null;
+        } catch {
+          return null;
+        }
+      })();
+
+      if (localEvidence) {
+        setReviewedEvidence(localEvidence);
+        setShowEvidenceModal(true);
+        return;
+      }
+
+      // 2. Otherwise fetch from backend API
+      const activeToken = token || localStorage.getItem('pod_token');
+      const headers = activeToken ? { Authorization: `Bearer ${activeToken}` } : {};
       const resp = await axios.get(`/api/v1/evidence/${deliveryId}`, { headers });
       setReviewedEvidence(resp.data);
       setShowEvidenceModal(true);
@@ -796,6 +1058,7 @@ export default function App() {
     setPhotoPreview(null);
     setSignatureBase64(null);
     setOtpEntered('');
+    setOtpError(null);
     setSelectedDelivery(null);
     setActiveTab('deliveries');
   };
@@ -806,14 +1069,19 @@ export default function App() {
     const gpsScore = disableGPS ? 0 : 25;
     const timestampScore = 20;
     const sigScore = signatureBase64 ? 20 : 0;
-    const otpScore = (selectedDelivery && otpEntered === selectedDelivery.otp_code) ? 10 : 0;
+    const isOtpMatching = Boolean(
+      selectedDelivery &&
+      selectedDelivery.otp_code &&
+      otpEntered.trim() === selectedDelivery.otp_code.trim()
+    );
+    const otpScore = isOtpMatching ? 10 : 0;
     const total = photoScore + gpsScore + timestampScore + sigScore + otpScore;
     
     let classification = 'ACCEPTED';
     if (total < 70) classification = 'DISPUTE';
     else if (total < 90) classification = 'NEEDS_MANUAL_REVIEW';
 
-    return { photoScore, gpsScore, timestampScore, sigScore, otpScore, total, classification };
+    return { photoScore, gpsScore, timestampScore, sigScore, otpScore, total, classification, isOtpMatching };
   };
 
   const liveScores = calculateLiveScores();
@@ -833,78 +1101,257 @@ export default function App() {
   }
 
   if (!token) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-center items-center p-6 sm:p-12 animate-fade-in-up">
-        <div className="max-w-6xl w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 md:p-12 shadow-sm space-y-8">
-          <div className="flex flex-col items-center text-center space-y-3">
-            <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-2xl shadow-sm w-fit mx-auto">
-              <ShieldCheck className="w-10 h-10 text-emerald-500" />
+    const currentLoginRole = getLoginRoleFromLocation(currentPath);
+    if (currentLoginRole) {
+      const preset = loginPresets.find(p => p.role === currentLoginRole) || loginPresets[0];
+      const RoleIcon = preset.icon;
+
+      return (
+        <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-center items-center p-4 sm:p-8 animate-fade-in-up">
+          <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 sm:p-10 shadow-2xl space-y-6">
+            <button
+              type="button"
+              onClick={() => {
+                setLoginError(null);
+                navigate('/');
+              }}
+              className="text-xs font-semibold text-slate-400 hover:text-slate-100 flex items-center space-x-1.5 transition btn-press-feedback"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Back to role selection</span>
+            </button>
+
+            <div className="text-center space-y-3 pt-2">
+              <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-2xl shadow-sm w-fit mx-auto">
+                <RoleIcon className="w-8 h-8 text-emerald-500" />
+              </div>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-widest px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-full">
+                  {preset.label}
+                </span>
+                <h1 className="text-2xl font-extrabold tracking-tight text-slate-100 mt-2">
+                  Sign in to Portal
+                </h1>
+                <p className="text-slate-400 text-xs mt-1 max-w-xs mx-auto">
+                  {preset.desc}
+                </p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-3xl font-extrabold tracking-tight text-slate-100 text-center">Standardised POD Engine</h1>
-              <p className="text-slate-400 text-sm mt-2 max-w-md mx-auto text-center">
-                Proof-of-Delivery verification platform with telemetry grading and offline synchronization.
-              </p>
+
+            <form onSubmit={(e) => handleRoleLogin(currentLoginRole, e)} className="space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-slate-300 block">
+                  Email Address
+                </label>
+                <div className="relative">
+                  <Mail className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="email"
+                    required
+                    placeholder={preset.email}
+                    value={loginEmail}
+                    onChange={(e) => {
+                      setLoginEmail(e.target.value);
+                      if (loginError) setLoginError(null);
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3 py-2.5 text-xs text-slate-200 font-mono focus:border-emerald-500 transition"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-slate-300 block">
+                  Password
+                </label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    placeholder="••••••••"
+                    value={loginPassword}
+                    onChange={(e) => {
+                      setLoginPassword(e.target.value);
+                      if (loginError) setLoginError(null);
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-10 py-2.5 text-xs text-slate-200 font-mono focus:border-emerald-500 transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition"
+                    title={showPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {loginError && (
+                <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-400 flex items-start space-x-2 animate-fade-in-up">
+                  <AlertTriangle className="w-4 h-4 flex-shrink-0 text-rose-400 mt-0.5" />
+                  <span className="leading-tight">{loginError}</span>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isLoggingIn}
+                className="w-full btn-success font-bold py-3 rounded-xl transition flex items-center justify-center space-x-2 disabled:opacity-50 btn-press-feedback mt-2"
+              >
+                {isLoggingIn ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Signing in...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Sign In</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+
+              <div className="pt-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginEmail(preset.email);
+                    setLoginPassword(preset.pass);
+                    setLoginError(null);
+                  }}
+                  className="text-[11px] text-slate-400 hover:text-emerald-400 font-mono transition inline-flex items-center space-x-1"
+                >
+                  <span>Click to fill demo credentials ({preset.email})</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between animate-fade-in-up">
+        {/* Top Header */}
+        <header className="bg-slate-900 border-b border-slate-800 px-6 py-4 w-full sticky top-0 z-40">
+          <div className="max-w-6xl mx-auto flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <div className="p-2 bg-slate-950 border border-slate-800 rounded-xl shadow-xs">
+                <ShieldCheck className="w-5 h-5 text-emerald-600" />
+              </div>
+              <span className="font-bold text-base text-slate-100 tracking-tight">Standardised POD Engine</span>
+            </div>
+            <div className="flex items-center space-x-2 text-xs text-slate-500 font-medium">
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span className="font-mono text-[11px] text-slate-400">System Ready</span>
+            </div>
+          </div>
+        </header>
+
+        {/* Main Content Area */}
+        <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-10 flex flex-col items-center justify-center space-y-8">
+          {/* Centered Heading & Subtitle */}
+          <div className="text-center space-y-2 max-w-2xl mx-auto">
+            <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-2xl shadow-xs w-fit mx-auto mb-2">
+              <ShieldCheck className="w-8 h-8 text-emerald-600" />
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-100">
+              Standardised POD Engine
+            </h1>
+            <p className="text-slate-400 text-xs sm:text-sm leading-relaxed max-w-lg mx-auto">
+              Proof-of-Delivery verification platform with telemetry grading and offline synchronization.
+            </p>
+            <div className="pt-2">
+              <span className="text-[11px] uppercase tracking-wider font-bold text-slate-400 font-mono">
+                Select your workspace role to sign in
+              </span>
             </div>
           </div>
 
-          <div className="space-y-6">
-            <h2 className="text-xs uppercase tracking-wider font-bold text-slate-400 text-center">
-              Select your workspace role to sign in
-            </h2>
-            
+          {/* Cards Grid: 3 Top Row, 2 Centered Bottom Row */}
+          <div className="w-full max-w-5xl space-y-6">
+            {/* Row 1: Rider, Dispatcher, Admin (3 columns on desktop) */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {loginPresets.map((preset) => {
+              {loginPresets.slice(0, 3).map((preset) => {
                 const IconComponent = preset.icon;
-                const isSelected = selectedEmail === preset.email;
                 return (
                   <button
                     key={preset.email}
+                    type="button"
                     onClick={() => {
-                      setSelectedEmail(preset.email);
-                      setTimeout(() => {
-                        handleLogin(preset.email, preset.pass);
-                      }, 200);
+                      setLoginError(null);
+                      setLoginEmail(preset.email);
+                      setLoginPassword('');
+                      navigate(`/login/${preset.role}`);
                     }}
-                    className={`group text-left bg-slate-900 border rounded-3xl p-6 hover-elevation flex flex-col justify-between h-72 text-sm focus:outline-none focus:ring-2 focus:ring-slate-100 focus:ring-offset-2 btn-press-feedback transition-all duration-200 ${
-                      isSelected
-                        ? 'border-slate-100 ring-2 ring-slate-100 bg-slate-950'
-                        : 'border-slate-800'
-                    }`}
+                    className="group text-left bg-slate-900 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-6 shadow-xs hover:shadow-md flex flex-col justify-between h-[280px] text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 btn-press-feedback transition-all duration-200"
                   >
-                    <div className="space-y-4">
-                      <div className={`p-3 rounded-2xl border transition w-fit ${
-                        isSelected
-                          ? 'bg-slate-900 border-slate-100 text-slate-100'
-                          : 'bg-slate-950 border-slate-800 group-hover:border-slate-400'
-                      }`}>
-                        <IconComponent className={`w-6 h-6 transition ${
-                          isSelected
-                            ? 'text-emerald-500'
-                            : 'text-slate-100 group-hover:text-emerald-500'
-                        }`} />
+                    <div className="space-y-3.5">
+                      <div className="p-3 rounded-xl border bg-slate-950 border-slate-800 group-hover:border-emerald-500/30 group-hover:bg-emerald-50/50 transition w-fit">
+                        <IconComponent className="w-5 h-5 text-slate-100 group-hover:text-emerald-600 transition" />
                       </div>
                       <div>
-                        <div className="font-extrabold text-base text-slate-100">{preset.label}</div>
+                        <div className="font-bold text-base text-slate-100">{preset.label}</div>
                         <div className="text-xs text-slate-400 font-mono mt-0.5">{preset.email}</div>
                       </div>
-                      <p className="text-xs text-slate-400 leading-relaxed line-clamp-3">{preset.desc}</p>
+                      <p className="text-xs text-slate-400 leading-relaxed line-clamp-3 h-[50px]">{preset.desc}</p>
                     </div>
                     
-                    <div className={`flex items-center justify-between pt-4 border-t transition mt-auto w-full ${
-                      isSelected ? 'border-slate-100' : 'border-slate-800 group-hover:border-slate-400'
-                    }`}>
+                    <div className="flex items-center justify-between pt-4 border-t border-slate-800 group-hover:border-slate-700 transition mt-auto w-full">
                       <span className="text-xs font-semibold text-slate-400 group-hover:text-slate-100">Access Portal</span>
-                      <ArrowRight className={`w-4 h-4 transition ${
-                        isSelected ? 'text-emerald-500 translate-x-1' : 'text-slate-400 group-hover:text-emerald-500 group-hover:translate-x-1'
-                      }`} />
+                      <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-emerald-600 group-hover:translate-x-1 transition-transform" />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Row 2: Restaurant, Customer (2 columns centered with matching width) */}
+            <div className="flex flex-wrap justify-center gap-6">
+              {loginPresets.slice(3, 5).map((preset) => {
+                const IconComponent = preset.icon;
+                return (
+                  <button
+                    key={preset.email}
+                    type="button"
+                    onClick={() => {
+                      setLoginError(null);
+                      setLoginEmail(preset.email);
+                      setLoginPassword('');
+                      navigate(`/login/${preset.role}`);
+                    }}
+                    className="group text-left bg-slate-900 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-6 shadow-xs hover:shadow-md flex flex-col justify-between h-[280px] w-full md:w-[calc(50%-12px)] lg:w-[calc(33.3333%-16px)] text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 btn-press-feedback transition-all duration-200"
+                  >
+                    <div className="space-y-3.5">
+                      <div className="p-3 rounded-xl border bg-slate-950 border-slate-800 group-hover:border-emerald-500/30 group-hover:bg-emerald-50/50 transition w-fit">
+                        <IconComponent className="w-5 h-5 text-slate-100 group-hover:text-emerald-600 transition" />
+                      </div>
+                      <div>
+                        <div className="font-bold text-base text-slate-100">{preset.label}</div>
+                        <div className="text-xs text-slate-400 font-mono mt-0.5">{preset.email}</div>
+                      </div>
+                      <p className="text-xs text-slate-400 leading-relaxed line-clamp-3 h-[50px]">{preset.desc}</p>
+                    </div>
+                    
+                    <div className="flex items-center justify-between pt-4 border-t border-slate-800 group-hover:border-slate-700 transition mt-auto w-full">
+                      <span className="text-xs font-semibold text-slate-400 group-hover:text-slate-100">Access Portal</span>
+                      <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-emerald-600 group-hover:translate-x-1 transition-transform" />
                     </div>
                   </button>
                 );
               })}
             </div>
           </div>
-        </div>
+        </main>
+
+        {/* Bottom Footer */}
+        <footer className="w-full py-4 border-t border-slate-800 text-center text-xs text-slate-400">
+          <div className="max-w-6xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-2">
+            <span>Standardised Proof of Delivery System &copy; 2026</span>
+            <span className="font-mono text-[11px]">Multi-Factor Telemetry &amp; Evidence Quality Engine</span>
+          </div>
+        </footer>
       </div>
     );
   }
@@ -1213,6 +1660,12 @@ export default function App() {
                 </form>
               )}
             </div>
+
+            {/* Review 1 Limitations and Media Artifacts */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <LimitationsReportCard />
+              <DemoMediaHubCard />
+            </div>
           </div>
         )}
 
@@ -1315,11 +1768,12 @@ export default function App() {
                 </div>
 
                 {/* B. KPI Comparison Side-by-Side Cards */}
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
                   {[
+                    { label: 'Evidence Completeness', base: runDetail.baseline_metrics.evidence_completeness_rate, prop: runDetail.proposed_metrics.evidence_completeness_rate, isPct: true },
+                    { label: 'Disputes Resolved', base: runDetail.baseline_metrics.disputes_resolved, prop: runDetail.proposed_metrics.disputes_resolved, isPct: false },
                     { label: 'Accuracy', base: runDetail.baseline_metrics.accuracy, prop: runDetail.proposed_metrics.accuracy, isPct: true },
                     { label: 'Dispute Rate', base: runDetail.baseline_metrics.dispute_rate, prop: runDetail.proposed_metrics.dispute_rate, isPct: true },
-                    { label: 'Disputes Resolved', base: runDetail.baseline_metrics.disputes_resolved, prop: runDetail.proposed_metrics.disputes_resolved, isPct: false },
                     { label: 'Dispute Res. Rate', base: runDetail.baseline_metrics.dispute_resolution_rate, prop: runDetail.proposed_metrics.dispute_resolution_rate, isPct: true },
                     { label: 'Evidence Validity', base: runDetail.baseline_metrics.evidence_validity_rate, prop: runDetail.proposed_metrics.evidence_validity_rate, isPct: true }
                   ].map((card, idx) => {
@@ -1642,6 +2096,13 @@ export default function App() {
                     <div className="text-[10px] text-slate-500">Disputes / Total Ratio</div>
                   </div>
                 </div>
+
+                {/* Stored Benchmark Experiment Card */}
+                <BenchmarkExperimentCard
+                  runDetail={runDetail}
+                  loading={runDetailLoading}
+                  onViewFullExperiment={() => setActiveTab('experiments')}
+                />
 
                 {/* 2. Visualizations Layout */}
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -2039,6 +2500,12 @@ export default function App() {
                     </div>
                   )}
                 </div>
+
+                {/* 6. Review 1 Limitations and Media Artifacts */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <LimitationsReportCard />
+                  <DemoMediaHubCard />
+                </div>
               </div>
             )}
           </div>
@@ -2084,7 +2551,15 @@ export default function App() {
                   </div>
                   <div className="flex items-center space-x-1.5 text-slate-400">
                     <KeyRound className="w-3.5 h-3.5 text-slate-50" />
-                    <span>Required OTP Code: <strong className="text-slate-200 font-mono">{del.otp_code}</strong></span>
+                    {userRole === 'rider' ? (
+                      <span>Recipient OTP: <strong className="text-slate-400 italic font-normal">Collect 4-digit code from customer</strong></span>
+                    ) : userRole === 'restaurant' ? (
+                      <span>Customer OTP: <strong className="text-slate-400 italic font-normal">Sent to customer mobile ({del.customer_phone})</strong></span>
+                    ) : userRole === 'customer' ? (
+                      <span>Your Delivery OTP: <strong className="text-slate-200 font-mono">{del.otp_code}</strong> (Share with rider upon delivery)</span>
+                    ) : (
+                      <span>Required OTP Code: <strong className="text-slate-200 font-mono">{del.otp_code}</strong></span>
+                    )}
                   </div>
                 </div>
 
@@ -2092,12 +2567,9 @@ export default function App() {
                 <LeafletMap targetLat={del.target_latitude} targetLng={del.target_longitude} />
 
                 <div className="flex space-x-2 pt-2">
-                  {(userRole === 'rider' || userRole === 'admin') && del.status !== 'delivered' && (
+                  {(userRole === 'rider' || userRole === 'admin') && (
                     <button
-                      onClick={() => {
-                        setSelectedDelivery(del);
-                        setActiveTab('evidence_capture');
-                      }}
+                      onClick={() => handleOpenCapture(del)}
                       className="flex-1 btn-primary py-2.5 rounded-xl font-semibold text-xs transition flex items-center justify-center space-x-1.5 btn-press-feedback"
                     >
                       <Camera className="w-4 h-4" />
@@ -2154,7 +2626,7 @@ export default function App() {
                   <Camera className="w-4 h-4 text-slate-400" />
                   <span>1. Delivery Photo Capture (Laplacian Blur & Brightness Check)</span>
                 </label>
-                <div className="flex items-center space-x-4">
+                <div className="flex flex-wrap items-center gap-3">
                   <input
                     type="file"
                     accept="image/*"
@@ -2162,6 +2634,14 @@ export default function App() {
                     onChange={handlePhotoSelect}
                     className="text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border file:border-slate-800 file:text-xs file:font-semibold file:bg-slate-950 file:text-slate-100 hover:file:bg-slate-800 cursor-pointer transition"
                   />
+                  <button
+                    type="button"
+                    onClick={handleUseSamplePhoto}
+                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold transition btn-press-feedback flex items-center space-x-1"
+                  >
+                    <Camera className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Use Sample Photo</span>
+                  </button>
                 </div>
                 {photoPreview && (
                   <div className="mt-2 relative w-full h-48 bg-slate-950 rounded-xl overflow-hidden border border-slate-800">
@@ -2229,19 +2709,51 @@ export default function App() {
               </div>
 
               {/* 4. OTP Code Entry */}
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-slate-300 flex items-center space-x-1">
-                  <KeyRound className="w-4 h-4 text-slate-400" />
-                  <span>4. Recipient OTP Code Verification (10 Pts)</span>
-                </label>
-                <input
-                  type="text"
-                  maxLength={6}
-                  placeholder="Enter 4-digit OTP"
-                  value={otpEntered}
-                  onChange={(e) => setOtpEntered(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-slate-200 font-mono tracking-widest"
-                />
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-semibold text-slate-300 flex items-center space-x-1">
+                    <KeyRound className="w-4 h-4 text-slate-400" />
+                    <span>4. Recipient OTP Code Verification (10 Pts)</span>
+                  </label>
+                  {liveScores.isOtpMatching && (
+                    <span className="text-[11px] font-semibold text-emerald-400 flex items-center space-x-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>OTP Matched</span>
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <input
+                    type="text"
+                    maxLength={4}
+                    placeholder="Enter 4-digit OTP from customer"
+                    value={otpEntered}
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/\D/g, '').slice(0, 4);
+                      setOtpEntered(val);
+                      if (otpError) setOtpError(null);
+                    }}
+                    className={`w-full bg-slate-950 border rounded-xl px-3 py-2 text-sm text-slate-200 font-mono tracking-widest transition ${
+                      otpError
+                        ? 'border-rose-500 focus:border-rose-600'
+                        : liveScores.isOtpMatching
+                        ? 'border-emerald-500 focus:border-emerald-600'
+                        : 'border-slate-800 focus:border-emerald-500'
+                    }`}
+                  />
+                  {otpError && (
+                    <div className="p-2.5 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-400 flex items-center space-x-2">
+                      <AlertTriangle className="w-4 h-4 flex-shrink-0 text-rose-400" />
+                      <span>{otpError}</span>
+                    </div>
+                  )}
+                  {!otpError && (
+                    <p className="text-[11px] text-slate-400">
+                      Ask the customer for their 4-digit handover OTP code.
+                    </p>
+                  )}
+                </div>
               </div>
 
               <button
@@ -2303,90 +2815,134 @@ export default function App() {
 
         {/* TAB 3: Create Delivery (Restaurant Only) */}
         {activeTab === 'create_delivery' && (
-          <form onSubmit={handleCreateDeliverySubmit} className="max-w-xl mx-auto bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
-            <h2 className="text-xl font-bold text-slate-100">Create New Order Delivery</h2>
-
-            <div>
-              <label className="text-xs text-slate-400">Delivery ID</label>
-              <input
-                type="text"
-                value={newDeliveryId}
-                onChange={(e) => setNewDeliveryId(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-slate-200"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs text-slate-400">Customer Name</label>
-                <input
-                  type="text"
-                  value={newCustomerName}
-                  onChange={(e) => setNewCustomerName(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400">Customer Phone</label>
-                <input
-                  type="text"
-                  value={newCustomerPhone}
-                  onChange={(e) => setNewCustomerPhone(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="text-xs text-slate-400">Delivery Address</label>
-              <input
-                type="text"
-                value={newAddress}
-                onChange={(e) => setNewAddress(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200"
-              />
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label className="text-xs text-slate-400">Target Lat</label>
-                <input
-                  type="number"
-                  step="any"
-                  value={newLat}
-                  onChange={(e) => setNewLat(parseFloat(e.target.value))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400">Target Lng</label>
-                <input
-                  type="number"
-                  step="any"
-                  value={newLng}
-                  onChange={(e) => setNewLng(parseFloat(e.target.value))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400">OTP Code</label>
-                <input
-                  type="text"
-                  maxLength={6}
-                  value={newOtp}
-                  onChange={(e) => setNewOtp(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-slate-200"
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              className="w-full btn-primary font-bold py-3 rounded-xl transition btn-press-feedback"
+          <div className="max-w-2xl w-full mx-auto animate-fade-in-up">
+            <form
+              onSubmit={handleCreateDeliverySubmit}
+              className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 space-y-5 shadow-xl"
             >
-              Publish Delivery
-            </button>
-          </form>
+              <div className="border-b border-slate-800 pb-4">
+                <div className="flex items-center space-x-2.5">
+                  <div className="p-2 bg-slate-950 border border-slate-800 rounded-xl shadow-xs">
+                    <Store className="w-5 h-5 text-emerald-600" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold text-slate-100">Create New Order Delivery</h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Publish a new delivery order with GPS target coordinates and verification OTP.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Delivery ID */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300 block">Delivery ID</label>
+                <input
+                  type="text"
+                  value={newDeliveryId}
+                  onChange={(e) => setNewDeliveryId(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-200 focus:border-emerald-500 transition"
+                />
+              </div>
+
+              {/* Customer Name & Customer Phone */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-300 block">Customer Name</label>
+                  <input
+                    type="text"
+                    value={newCustomerName}
+                    onChange={(e) => setNewCustomerName(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:border-emerald-500 transition"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-300 block">Customer Phone</label>
+                  <input
+                    type="text"
+                    value={newCustomerPhone}
+                    onChange={(e) => setNewCustomerPhone(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:border-emerald-500 transition"
+                  />
+                  <p className="text-[11px] text-slate-400">
+                    OTP will be sent to the customer&apos;s registered mobile number.
+                  </p>
+                </div>
+              </div>
+
+              {/* Delivery Address */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300 block">Delivery Address</label>
+                <input
+                  type="text"
+                  value={newAddress}
+                  onChange={(e) => setNewAddress(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:border-emerald-500 transition"
+                />
+              </div>
+
+              {/* Interactive Delivery Location Picker Map */}
+              <div className="space-y-1.5">
+                <LocationPickerMap
+                  lat={newLat}
+                  lng={newLng}
+                  onChange={(lat, lng) => {
+                    setNewLat(lat);
+                    setNewLng(lng);
+                  }}
+                />
+              </div>
+
+              {/* Target Lat & Target Lng */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-300 block">Target Lat</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={newLat}
+                    onChange={(e) => setNewLat(parseFloat(e.target.value))}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-200 focus:border-emerald-500 transition"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-300 block">Target Lng</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={newLng}
+                    onChange={(e) => setNewLng(parseFloat(e.target.value))}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-200 focus:border-emerald-500 transition"
+                  />
+                </div>
+              </div>
+
+              {/* Delivery OTP */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300 block">Delivery OTP</label>
+                <input
+                  type="text"
+                  maxLength={4}
+                  placeholder="Enter 4-digit OTP"
+                  value={newOtpCode}
+                  onChange={(e) => {
+                    const val = e.target.value.replace(/\D/g, '').slice(0, 4);
+                    setNewOtpCode(val);
+                  }}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-200 focus:border-emerald-500 transition"
+                />
+              </div>
+
+              {/* Submit Button */}
+              <button
+                type="submit"
+                className="w-full btn-primary font-bold py-3.5 rounded-xl shadow-xs transition flex items-center justify-center space-x-2 btn-press-feedback mt-2"
+              >
+                <PlusCircle className="w-4 h-4 text-emerald-400" />
+                <span>Publish Delivery</span>
+              </button>
+            </form>
+          </div>
         )}
 
         {/* Evidence Review Modal — rendered via portal at document.body to escape all parent stacking contexts */}

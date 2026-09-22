@@ -47,5 +47,14 @@ class Settings(BaseSettings):
     OPENCV_BRIGHTNESS_MIN: float = 40.0
     OPENCV_BRIGHTNESS_MAX: float = 220.0
 
+    # SMS Service Configuration
+    SMS_PROVIDER: Optional[str] = None  # e.g., 'fast2sms', 'twilio', 'generic', 'sandbox', 'mock'
+    FAST2SMS_API_KEY: Optional[str] = None
+    TWILIO_ACCOUNT_SID: Optional[str] = None
+    TWILIO_AUTH_TOKEN: Optional[str] = None
+    TWILIO_FROM_NUMBER: Optional[str] = None
+    SMS_API_URL: Optional[str] = None
+    SMS_API_KEY: Optional[str] = None
+
 settings = Settings()
 

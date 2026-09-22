@@ -19,6 +19,15 @@ class DeliveryStatusUpdate(BaseModel):
     reason_code: Optional[str] = "DISPATCHER_MANUAL_UPDATE"
     reason_text: Optional[str] = "Manual status override executed by dispatcher"
 
+class SendOtpRequest(BaseModel):
+    phone_number: Optional[str] = None
+
+class SendOtpResponse(BaseModel):
+    success: bool
+    message: str
+    phone_number: str
+    provider: Optional[str] = None
+
 class DeliveryResponse(BaseModel):
     id: str
     order_id: Optional[str] = None

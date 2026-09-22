@@ -1,0 +1,16 @@
+{
+  "name": "pod-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standardised Proof-of-Delivery (POD) System",
+  "scripts": {
+    "dev": "concurrently -k --names \"backend,frontend\" -c \"cyan.bold,green.bold\" \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "build:frontend": "npm run build --prefix frontend",
+    "test:backend": "cd backend && python run_tests.py"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

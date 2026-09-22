@@ -77,14 +77,39 @@ export const SignatureCanvas: React.FC<SignatureCanvasProps> = ({ onSave }) => {
     <div className="space-y-2">
       <div className="flex justify-between items-center text-xs text-slate-400">
         <span>Customer Signature Pad</span>
-        <button
-          type="button"
-          onClick={clearCanvas}
-          className="flex items-center space-x-1 text-slate-400 hover:text-slate-200 bg-slate-800 px-2 py-1 rounded transition"
-        >
-          <RotateCcw className="w-3 h-3" />
-          <span>Clear</span>
-        </button>
+        <div className="flex items-center space-x-2">
+          <button
+            type="button"
+            onClick={() => {
+              const canvas = canvasRef.current;
+              if (!canvas) return;
+              const ctx = canvas.getContext('2d');
+              if (!ctx) return;
+              ctx.strokeStyle = '#0F172A';
+              ctx.lineWidth = 3;
+              ctx.lineCap = 'round';
+              ctx.lineJoin = 'round';
+              ctx.beginPath();
+              ctx.moveTo(40, 80);
+              ctx.bezierCurveTo(80, 20, 120, 140, 160, 70);
+              ctx.bezierCurveTo(200, 40, 240, 120, 300, 80);
+              ctx.stroke();
+              setHasContent(true);
+              onSave(canvas.toDataURL('image/png'));
+            }}
+            className="flex items-center space-x-1 text-slate-300 hover:text-white bg-slate-800 px-2 py-1 rounded transition text-xs"
+          >
+            <span>Quick Sign</span>
+          </button>
+          <button
+            type="button"
+            onClick={clearCanvas}
+            className="flex items-center space-x-1 text-slate-400 hover:text-slate-200 bg-slate-800 px-2 py-1 rounded transition text-xs"
+          >
+            <RotateCcw className="w-3 h-3" />
+            <span>Clear</span>
+          </button>
+        </div>
       </div>
 
       <div className="border border-slate-700 bg-slate-900 rounded-xl overflow-hidden touch-none relative">

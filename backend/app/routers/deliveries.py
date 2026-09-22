@@ -9,8 +9,15 @@ from app.models.user import User, UserRole
 from app.models.delivery import Delivery, DeliveryStatus
 from app.models.dispatcher_override import DispatcherOverride
 from app.models.audit_log import AuditLog
-from app.schemas.delivery import DeliveryCreate, DeliveryResponse, DeliveryStatusUpdate
+from app.schemas.delivery import (
+    DeliveryCreate,
+    DeliveryResponse,
+    DeliveryStatusUpdate,
+    SendOtpRequest,
+    SendOtpResponse
+)
 from app.dependencies import get_current_user, RequireRole
+from app.services.sms_service import send_otp_sms, SMSNotConfiguredError, SMSSendError
 
 router = APIRouter(prefix="/deliveries", tags=["Deliveries"])
 
@@ -92,6 +99,54 @@ def get_delivery_by_id(
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery not found")
     return delivery
+
+@router.post("/{delivery_id}/send-otp", response_model=SendOtpResponse, status_code=status.HTTP_200_OK)
+def send_delivery_otp(
+    delivery_id: str,
+    otp_req: Optional[SendOtpRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+    if not delivery:
+        raise HTTPException(status_code=404, detail=f"Delivery '{delivery_id}' not found")
+
+    target_phone = (otp_req.phone_number if (otp_req and otp_req.phone_number) else None) or delivery.customer_phone
+    if not target_phone or not target_phone.strip():
+        raise HTTPException(status_code=400, detail="Customer mobile number is required to send OTP")
+
+    clean_digits = "".join(filter(str.isdigit, target_phone))
+    if len(clean_digits) < 10:
+        raise HTTPException(status_code=400, detail="Invalid customer mobile number. Minimum 10 digits required.")
+
+    try:
+        result = send_otp_sms(
+            phone_number=target_phone,
+            otp_code=delivery.otp_code,
+            customer_name=delivery.customer_name,
+            delivery_id=delivery.id
+        )
+        return SendOtpResponse(
+            success=True,
+            message="OTP sent successfully",
+            phone_number=result.get("phone_number", target_phone),
+            provider=result.get("provider", "sms_service")
+        )
+    except SMSNotConfiguredError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SMS service not configured"
+        )
+    except SMSSendError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to deliver SMS: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing OTP request: {str(e)}"
+        )
 
 @router.patch("/{delivery_id}/status", response_model=DeliveryResponse)
 def update_delivery_status(

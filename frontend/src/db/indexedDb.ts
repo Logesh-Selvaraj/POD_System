@@ -6,7 +6,7 @@ export interface PendingEvidenceItem {
   captured_latitude: number | null;
   captured_longitude: number | null;
   captured_timestamp: string;
-  otp_entered: string;
+  otp_entered?: string | null;
   signature_base64: string | null;
   photo_blob: Blob;
   status: 'PENDING' | 'SYNCING' | 'FAILED';
