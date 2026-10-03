@@ -242,4 +242,354 @@ python run_tests.py
 - `tests/test_admin.py`: Analytics KPI aggregations, component rating distributions, date boundary validation.
 - `tests/test_experiments.py`: 50-scenario baseline vs. proposed comparison evaluation engine and metric generation.
 - `tests/test_validation.py`: Stakeholder Likert scoring, role validation, session tracking, summary statistics.
+- `tests/test_otp_sms.py`: OTP SMS dispatch, sandbox/provider configuration, phone number validation.
 - `tests/test_e2e_scenarios.py`: Explicit end-to-end API tests for missing GPS, blurred photos, and offline capture with dispatcher override.
+
+For granular per-test documentation, see **[`docs/TESTING.md`](file:///c:/Users/logesh/Documents/CAT_PROJECT/docs/TESTING.md)**.
+
+---
+
+## 8. API Documentation
+
+All endpoints are prefixed with `/api/v1`.  JWT Bearer token authentication is
+required on all endpoints unless marked **Public**.
+
+Interactive documentation: `http://localhost:8000/docs`
+
+### Auth
+
+| Method | Path | Purpose | Auth | Roles |
+|---|---|---|---|---|
+| `POST` | `/api/v1/auth/login` | Authenticate and receive JWT | Public | — |
+| `POST` | `/api/v1/auth/register` | Register a new user account | Public | — |
+| `GET` | `/api/v1/auth/me` | Return the currently authenticated user | Bearer JWT | Any |
+
+**Login request body:**
+```json
+{ "email": "rider@pod.com", "password": "rider123" }
+```
+**Login response:** `{ "access_token": "...", "token_type": "bearer", "user": { ... } }`
+
+**Error responses:** `401` wrong credentials · `400` inactive account
+
+---
+
+### Deliveries
+
+| Method | Path | Purpose | Auth | Roles |
+|---|---|---|---|---|
+| `POST` | `/api/v1/deliveries/` | Create a new delivery | Bearer JWT | restaurant, admin |
+| `GET` | `/api/v1/deliveries/` | List deliveries (role-filtered) | Bearer JWT | Any |
+| `GET` | `/api/v1/deliveries/assigned` | List deliveries assigned to current rider | Bearer JWT | rider, admin |
+| `GET` | `/api/v1/deliveries/{delivery_id}` | Fetch a single delivery by ID | Bearer JWT | Any |
+| `POST` | `/api/v1/deliveries/{delivery_id}/send-otp` | Dispatch OTP SMS to customer | Bearer JWT | Any |
+| `PATCH` | `/api/v1/deliveries/{delivery_id}/status` | Update delivery status | Bearer JWT | Any |
+| `DELETE` | `/api/v1/deliveries/{delivery_id}` | Delete a delivery | Bearer JWT | restaurant (own), admin, dispatcher |
+
+**Create delivery body:** `id`, `customer_name`, `customer_phone`, `delivery_address`, `target_latitude`, `target_longitude`, `otp_code`, `rider_id` (optional), `customer_id` (optional)
+
+**Status update body:** `{ "status": "delivered", "reason_code": "...", "reason_text": "..." }`
+
+**Error responses:** `400` duplicate ID · `403` ownership · `404` not found · `422` validation · `503` SMS unconfigured · `502` SMS send failure
+
+---
+
+### Evidence
+
+| Method | Path | Purpose | Auth | Roles |
+|---|---|---|---|---|
+| `POST` | `/api/v1/evidence/submit` | Submit delivery evidence (multipart/form-data) | Bearer JWT | rider, admin |
+| `GET` | `/api/v1/evidence/{delivery_id}` | Fetch evidence record for a delivery | Bearer JWT | Any |
+
+**Submit evidence form fields:** `delivery_id` (required), `idempotency_key` (required), `photo` (file, required), `captured_latitude` (optional float), `captured_longitude` (optional float), `captured_timestamp` (optional ISO-8601 string), `otp_entered` (optional string), `signature_base64` (optional string)
+
+**Submit response:** Full evidence record including all EQE scores (`photo_score`, `gps_score`, `timestamp_score`, `signature_score`, `otp_score`, `total_quality_score`, `classification`).
+
+**Idempotency:** Re-submitting the same `idempotency_key` returns the existing record (no duplicate created).
+
+**Error responses:** `404` delivery not found · `403` wrong role
+
+---
+
+### Dispatcher
+
+| Method | Path | Purpose | Auth | Roles |
+|---|---|---|---|---|
+| `GET` | `/api/v1/dispatcher/queue` | Return deliveries requiring manual review | Bearer JWT | dispatcher, admin |
+| `POST` | `/api/v1/dispatcher/overrides` | Create a dispatcher override | Bearer JWT | dispatcher, admin |
+| `GET` | `/api/v1/dispatcher/deliveries/{delivery_id}/history` | Full event history for a delivery | Bearer JWT | dispatcher, admin |
+
+**Override request body:**
+```json
+{
+  "delivery_id": "DEL-1003",
+  "new_status": "delivered",
+  "reason_code": "BLURRY_PHOTO_VALIDATED",
+  "reason_text": "Customer confirmed receipt in person"
+}
+```
+**Override response:** New `DispatcherOverride` record. Also writes an `AuditLog` entry.
+
+**History response:** Chronologically sorted list of `OVERRIDE`, `AUDIT`, and `DISPUTE` events.
+
+**Error responses:** `400` disallowed status transition · `403` wrong role · `404` delivery not found · `422` missing reason_code
+
+---
+
+### Admin
+
+| Method | Path | Purpose | Auth | Roles |
+|---|---|---|---|---|
+| `GET` | `/api/v1/admin/analytics` | System-wide KPI analytics | Bearer JWT | admin |
+
+**Query parameters:** `from_date` (YYYY-MM-DD), `to_date` (YYYY-MM-DD)
+
+**Response fields:** `total_deliveries`, `accepted_deliveries`, `manual_review_deliveries`, `disputed_deliveries`, `average_evidence_score`, `dispute_rate`, `evidence_acceptance_rate`, `offline_capture_count`, `gps_failure_count`, `status_distribution`, `evidence_score_distribution`, `daily_delivery_counts`, `rider_performance`, `evidence_component_performance`, `dispute_analytics`
+
+**Error responses:** `403` non-admin · `422` invalid date format or range
+
+---
+
+### Admin Experiments
+
+| Method | Path | Purpose | Auth | Roles |
+|---|---|---|---|---|
+| `GET` | `/api/v1/admin/experiments` | List all experiment runs | Bearer JWT | admin |
+| `GET` | `/api/v1/admin/experiments/{run_id}` | Fetch detailed results for one run | Bearer JWT | admin |
+| `POST` | `/api/v1/admin/experiments/run` | Trigger a new 50-scenario benchmark run | Bearer JWT | admin |
+
+**Run response fields:** `id`, `name`, `dataset_size`, `baseline_description`, `proposed_system_description`, `created_at`, `completed_at`, plus nested `results` array.
+
+**Detail response:** Includes per-scenario breakdown (`evidence_complete`, `evidence_valid`, `false_positive`, `false_negative`, `final_classification`) and aggregate metrics (`improvement_percentage`, `false_positive_rate`, `false_negative_rate`).
+
+**Error responses:** `403` non-admin
+
+---
+
+### Stakeholder Validation
+
+| Method | Path | Purpose | Auth | Roles |
+|---|---|---|---|---|
+| `POST` | `/api/v1/validation/sessions` | Create a new validation session | Public | — |
+| `POST` | `/api/v1/validation/responses` | Submit a Likert rating response | Public | — |
+| `GET` | `/api/v1/validation/admin/summary` | Aggregated validation statistics | Bearer JWT | admin |
+| `GET` | `/api/v1/validation/admin/responses` | All raw validation responses | Bearer JWT | admin |
+
+**Session body:** `{ "participant_code": "P001", "stakeholder_role": "rider", "validation_scenario": "..." }`
+
+**Response body:** `{ "session_id": "uuid", "question_id": "Q1", "rating": 4, "comment": "..." }`
+
+Valid `stakeholder_role` values: `rider`, `dispatcher`, `restaurant`, `customer`
+
+Valid `question_id` values: `Q1` – `Q10`
+
+Valid `rating` values: integer 1–5 (Likert scale)
+
+**Error responses:** `422` invalid role / question_id / rating out of range · `403` non-admin for summary endpoints
+
+---
+
+### Utility Endpoints
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `GET` | `/` | System status and version | Public |
+| `GET` | `/health` | Health check | Public |
+| `GET` | `/static/uploads/{filename}` | Serve uploaded evidence photos and signatures | Public (URL-gated) |
+
+---
+
+## 9. Database Schema
+
+The system uses **SQLite** in development/testing and **PostgreSQL** in
+production.  The ORM layer (SQLAlchemy) is identical for both.
+
+### Relationship Overview
+
+```
+users
+ ├── deliveries (as restaurant, rider, or customer)
+ │    ├── evidence (1:1)
+ │    ├── disputes (1:many)
+ │    └── dispatcher_overrides (1:many)
+ ├── audit_logs (actor)
+ └── (Rider profile linked via riders table)
+
+restaurants ──► orders ──► deliveries
+customers   ──► orders
+
+experiment_runs ──► experiment_results ──► experiment_cases
+
+stakeholder_validation_sessions ──► stakeholder_validation_responses
+```
+
+---
+
+### `users`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | Integer | PK, indexed | Auto-increment user ID |
+| `email` | String | UNIQUE, NOT NULL, indexed | Login email |
+| `hashed_password` | String | NOT NULL | bcrypt hash |
+| `full_name` | String | NOT NULL | Display name |
+| `role` | Enum | NOT NULL | `restaurant`, `rider`, `customer`, `dispatcher`, `admin` |
+| `is_active` | Boolean | default=True | Soft-disable account |
+| `created_at` | DateTime | default=utcnow | Account creation time |
+
+---
+
+### `deliveries`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | String | PK, indexed | Human-readable ID e.g. `DEL-1001` |
+| `order_id` | String | FK → orders.id, nullable | Associated order (optional) |
+| `restaurant_id` | Integer | FK → users.id, NOT NULL | Restaurant that created delivery |
+| `rider_id` | Integer | FK → users.id, nullable | Assigned rider |
+| `customer_id` | Integer | FK → users.id, nullable | Recipient customer |
+| `rider_profile_id` | Integer | FK → riders.id, nullable | Link to riders profile table |
+| `customer_name` | String | NOT NULL | Recipient name |
+| `customer_phone` | String | NOT NULL | Recipient contact number |
+| `delivery_address` | String | NOT NULL | Human-readable drop-off address |
+| `target_latitude` | Float | NOT NULL | Drop-off GPS latitude |
+| `target_longitude` | Float | NOT NULL | Drop-off GPS longitude |
+| `otp_code` | String(6) | NOT NULL | 4-digit verification OTP |
+| `status` | Enum | NOT NULL, default=pending | `pending`, `assigned`, `in_transit`, `delivered`, `needs_review`, `disputed` |
+| `created_at` | DateTime | default=utcnow | |
+| `updated_at` | DateTime | default=utcnow, onupdate | |
+
+---
+
+### `evidence`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | String | PK, indexed | UUID |
+| `delivery_id` | String | FK → deliveries.id, UNIQUE, NOT NULL | One evidence record per delivery |
+| `rider_id` | Integer | FK → users.id, NOT NULL | Rider who submitted |
+| `photo_url` | String | NOT NULL | Path/URL to stored photo file |
+| `signature_url` | String | nullable | Path/URL to signature image |
+| `captured_latitude` | Float | nullable | GPS latitude at capture |
+| `captured_longitude` | Float | nullable | GPS longitude at capture |
+| `captured_timestamp` | DateTime | NOT NULL | ISO-8601 timestamp from client |
+| `is_offline_capture` | Boolean | default=False | True when GPS was null at capture |
+| `otp_entered` | String(6) | nullable | OTP submitted by rider |
+| `otp_valid` | Boolean | default=False | Whether OTP matched delivery record |
+| `distance_m` | Float | nullable | Haversine distance to destination (metres) |
+| `gps_valid` | Boolean | default=False | True if distance_m ≤ 150 m |
+| `timestamp_valid` | Boolean | default=False | True if timestamp was present |
+| `blur_score` | Float | nullable | Laplacian variance (higher = sharper) |
+| `brightness_score` | Float | nullable | Mean pixel intensity [0–255] |
+| `photo_score` | Float | default=0.0 | EQE score component (max 25) |
+| `gps_score` | Float | default=0.0 | EQE score component (max 25) |
+| `timestamp_score` | Float | default=0.0 | EQE score component (max 20) |
+| `signature_score` | Float | default=0.0 | EQE score component (max 20) |
+| `otp_score` | Float | default=0.0 | EQE score component (max 10) |
+| `total_quality_score` | Float | default=0.0 | Sum of all components (0–100) |
+| `classification` | Enum | NOT NULL | `ACCEPTED`, `NEEDS_MANUAL_REVIEW`, `DISPUTE` |
+| `idempotency_key` | String | UNIQUE, indexed, NOT NULL | Client-generated UUID for dedup |
+| `created_at` | DateTime | default=utcnow | |
+
+---
+
+### `dispatcher_overrides`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | String | PK, indexed | UUID |
+| `delivery_id` | String | FK → deliveries.id, NOT NULL | Target delivery |
+| `dispatcher_id` | Integer | FK → users.id, NOT NULL | Dispatcher/admin who acted |
+| `previous_status` | String | NOT NULL | Status before override |
+| `new_status` | String | NOT NULL | Status after override |
+| `reason_code` | String | NOT NULL | Machine-readable reason e.g. `BLURRY_PHOTO_VALIDATED` |
+| `reason_text` | String | NOT NULL | Human-readable justification |
+| `created_at` | DateTime | default=utcnow | |
+
+---
+
+### `audit_logs` (append-only)
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | String | PK, indexed | UUID |
+| `actor_id` | Integer | FK → users.id, nullable | User who triggered the event |
+| `entity_type` | String | NOT NULL | Entity class: `DELIVERY`, `DISPUTE`, etc. |
+| `entity_id` | String | NOT NULL | PK of the changed record |
+| `action` | String | NOT NULL | Event code e.g. `CREATE_DELIVERY`, `dispatcher_override` |
+| `previous_state` | Text | nullable | JSON snapshot before change |
+| `new_state` | Text | nullable | JSON snapshot after change |
+| `reason` | Text | nullable | Justification text |
+| `created_at` | DateTime | default=utcnow | |
+
+> **Append-only:** UPDATE and DELETE are blocked by SQLAlchemy event listeners
+> (all environments) and a PostgreSQL trigger (production).
+
+---
+
+### `disputes`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | String | PK, indexed | UUID |
+| `delivery_id` | String | FK → deliveries.id, NOT NULL | Disputed delivery |
+| `raised_by_user_id` | Integer | FK → users.id, NOT NULL | User who raised dispute |
+| `reason` | String | NOT NULL | Dispute description |
+| `status` | String | NOT NULL, default=OPEN | `OPEN`, `IN_REVIEW`, `RESOLVED_REFUNDED`, `RESOLVED_REJECTED` |
+| `resolution_notes` | String | nullable | Resolution outcome notes |
+| `created_at` | DateTime | default=utcnow | |
+| `resolved_at` | DateTime | nullable | When dispute was closed |
+
+---
+
+### `orders`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | String | PK, indexed | e.g. `ORD-1001` |
+| `restaurant_id` | Integer | FK → restaurants.id, NOT NULL | Restaurant that placed order |
+| `customer_id` | Integer | FK → customers.id, NOT NULL | Customer who ordered |
+| `items_summary` | String | NOT NULL | Free text order summary |
+| `total_amount` | Float | NOT NULL | Order value |
+| `target_address` | String | NOT NULL | Delivery address |
+| `target_latitude` | Float | NOT NULL | GPS latitude |
+| `target_longitude` | Float | NOT NULL | GPS longitude |
+| `otp_code` | String(6) | NOT NULL | Verification OTP |
+| `status` | String | NOT NULL, default=PENDING | `PENDING`, `ASSIGNED`, `COMPLETED`, `DISPUTED` |
+| `created_at` | DateTime | default=utcnow | |
+
+---
+
+### `restaurants`, `riders`, `customers`
+
+Profile tables that extend `users` with domain-specific fields.  Each links
+back to `users.id` via a one-to-one foreign key.  See [`backend/app/models/`](file:///c:/Users/logesh/Documents/CAT_PROJECT/backend/app/models/) for full column listings.
+
+---
+
+### Experiment Tables
+
+| Table | Purpose |
+|---|---|
+| `experiment_runs` | One row per A/B evaluation run |
+| `experiment_cases` | 50 pre-defined test scenarios (photo quality, GPS, OTP, etc.) |
+| `experiment_results` | Per-scenario outcome for both BASELINE and PROPOSED systems |
+
+---
+
+### Stakeholder Validation Tables
+
+| Table | Purpose |
+|---|---|
+| `stakeholder_validation_sessions` | One row per usability test participant session |
+| `stakeholder_validation_responses` | One row per question (Q1–Q10) per session (Likert 1–5) |
+
+---
+
+## 10. Additional Documentation
+
+| Document | Path | Contents |
+|---|---|---|
+| Testing Guide | [`docs/TESTING.md`](file:///c:/Users/logesh/Documents/CAT_PROJECT/docs/TESTING.md) | Per-suite test documentation, coverage matrix, skip rationale |
+| Error Handling | [`docs/ERROR_HANDLING.md`](file:///c:/Users/logesh/Documents/CAT_PROJECT/docs/ERROR_HANDLING.md) | Error Boundary, frontend patterns, backend error codes |
+| Decisions & Changelog | [`docs/DECISIONS_AND_CHANGELOG.md`](file:///c:/Users/logesh/Documents/CAT_PROJECT/docs/DECISIONS_AND_CHANGELOG.md) | Architectural Decision Records |

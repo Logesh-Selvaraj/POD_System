@@ -77,6 +77,8 @@ The system has undergone rigorous automated quality assurance:
 31. [Stakeholder Usability Validation](#31-stakeholder-validation)
 32. [System Limitations & Boundary Conditions](#32-limitations)
 33. [Quality Assurance & Testing Strategy](#33-testing-strategy)
+    - 33.1 [Granular Technical Documentation on Unit Testing](#331-granular-technical-documentation-on-unit-testing)
+    - 33.2 [Frontend Error Boundary & Full-Stack Exception Handling](#332-frontend-error-boundary--full-stack-exception-handling)
 34. [Backend Automated Test Results (63 Tests across 10 Suites)](#34-backend-test-results)
 35. [Frontend Build & Type Verification](#35-frontend-build-verification)
 36. [End-to-End Integration Scenario Testing](#36-end-to-end-scenario-testing)
@@ -832,6 +834,42 @@ The quality assurance strategy utilizes a multi-tiered testing hierarchy combini
 |      [ Frontend TypeScript & PWA Build Tests ]    (Vite & tsc / Passed)     |
 +-----------------------------------------------------------------------------+
 ```
+
+### 33.1 Granular Technical Documentation on Unit Testing
+
+A comprehensive testing guide has been established in [`docs/TESTING.md`](file:///c:/Users/logesh/Documents/CAT_PROJECT/docs/TESTING.md). The test architecture separates unit-level mathematical checks, database relational constraints, and end-to-end API workflows:
+
+1. **Test Execution Protocol:**
+   - Command: `pytest -v` (within the `backend/` directory) or `python run_tests.py`.
+   - SQLite In-Memory Database Mode (`USE_SQLITE=true`) allows rapid CI/CD test execution with zero external PostgreSQL dependencies.
+   - All 63 collected test items across 10 distinct test suites pass cleanly (62 passed, 1 skipped due to PostgreSQL-specific trigger check under SQLite).
+2. **Granular Breakdown by Test Suite:**
+   - **`test_auth.py` (3 tests):** Validates password bcrypt hashing, token expiration, JWT generation, and 401 unauthorized rejection.
+   - **`test_deliveries.py` (2 tests):** Validates delivery creation, status lifecycle, and rider role filtering.
+   - **`test_dispatcher.py` (10 tests):** Enforces 403 non-dispatcher rejections, mandatory override reason codes (minimum 10-char note on `OTHER`), and audit log creation.
+   - **`test_quality_engine.py` (3 tests):** Validates 100-point rubric, Haversine 150m boundary threshold, OpenCV Laplacian variance thresholds, and 75-point offline fallback.
+   - **`test_relationships.py` (3 tests):** Verifies 10-table 3NF relational foreign key navigation and append-only trigger protection.
+   - **`test_admin.py` (6 tests):** Validates admin analytics aggregations, KPI computations, and date range error handling.
+   - **`test_otp_sms.py` (8 tests):** Tests SMS gateway configuration, Twilio/Fast2SMS provider mock dispatch, phone number regex validation, and sandbox fallback.
+   - **`test_experiments.py` (14 tests):** Validates the 50-scenario benchmark engine comparing single-photo baselines against the multi-factor proposed system.
+   - **`test_validation.py` (10 tests):** Tests 5-point Likert usability scale boundary conditions (rejecting ratings < 1 or > 5 with HTTP 422).
+   - **`test_e2e_scenarios.py` (4 tests):** Executes full multi-step HTTP workflows verifying missing GPS review routing, blur detection triage, dispute routing, and offline idempotency.
+
+### 33.2 Frontend Error Boundary & Full-Stack Exception Handling
+
+A dedicated error boundary and resilience specification has been established in [`docs/ERROR_HANDLING.md`](file:///c:/Users/logesh/Documents/CAT_PROJECT/docs/ERROR_HANDLING.md).
+
+1. **React Component Error Boundary (`ErrorBoundary.tsx`):**
+   - Implemented as a class component wrapping the root `<App />` tree in `main.tsx`.
+   - Implements `getDerivedStateFromError` to catch uncaught runtime JavaScript/React rendering errors and prevent white-screen crashes.
+   - Implements `componentDidCatch` to log component stack traces for diagnostic telemetry.
+   - Renders a user-friendly recovery UI with a "Try Again" state reset button and "Reload Page" fallback, ensuring couriers and dispatchers never lose visibility of unsynced deliveries.
+2. **Network & Offline Exception Fallback:**
+   - Axios request interceptors and error handlers capture 401 Unauthorized (triggering session cleanup and redirect to login), 403 Forbidden (displaying RBAC alerts), and network disconnection (triggering offline fallback to IndexedDB).
+   - `SyncManager.ts` encapsulates exponential backoff retry logic, ensuring transient server dropouts do not discard captured proof-of-delivery records.
+3. **Backend Exception Hierarchy:**
+   - Structured FastAPI `HTTPException` responses with standardized RFC-compliant error payloads (`detail`, `error_code`, `timestamp`).
+   - Pydantic validation interceptors automatically return HTTP 422 Unprocessable Entity with exact field-level issue paths.
 
 ---
 
